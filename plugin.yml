@@ -1,0 +1,215 @@
+id: ai-scraper-js
+name: ai scraper
+version: 1.0.0
+min_core_version: 1.4.8
+author: Ting Reader Team
+description:
+  zh: 汇总存储库自动刮削结果，并使用 AI 选择最合适的有声书元数据。
+  en: Aggregate configured automatic scraper results and use AI to choose audiobook metadata.
+runtime: javascript
+license: MIT
+entry_point: plugin.js
+capabilities:
+- id: metadata.search
+  kind: metadata_provider
+  invoke: search
+  auto_scrape: true
+  aggregate_auto_scrape: true
+  search_fields:
+  - key: title
+    label:
+      zh: 书名
+      en: Title
+    required: true
+    type: text
+    placeholder:
+      zh: 输入书名
+      en: Enter title
+    default_from: book.title
+  - key: author
+    label:
+      zh: 作者
+      en: Author
+    required: false
+    type: text
+    placeholder:
+      zh: 可选，用于辅助判断
+      en: Optional, helps disambiguation
+    default_from: book.author
+  result_fields:
+  - key: title
+    label:
+      zh: 书名
+      en: Title
+  - key: author
+    label:
+      zh: 作者
+      en: Author
+  - key: narrator
+    label:
+      zh: 演播者
+      en: Narrator
+  - key: cover_url
+    label:
+      zh: 封面
+      en: Cover
+  - key: intro
+    label:
+      zh: 简介
+      en: Description
+  - key: tags
+    label:
+      zh: 标签
+      en: Tags
+  - key: chapter_title_template
+    label:
+      zh: 章节标题模板
+      en: Chapter title template
+  - key: chapter_titles
+    label:
+      zh: AI 清洗章节名
+      en: AI-cleaned chapter titles
+config_schema:
+  type: object
+  properties:
+    api_base_url:
+      type: string
+      title:
+        zh: API 地址
+        en: API endpoint
+      description:
+        zh: OpenAI 兼容 chat/completions 地址。也可以填写服务根地址，插件会自动补全 /v1/chat/completions。
+        en: OpenAI-compatible chat/completions endpoint. A service root URL is also accepted.
+      default: https://api.openai.com/v1/chat/completions
+    api_key:
+      type: string
+      format: secret
+      x-encrypted: true
+      title:
+        zh: API 密钥
+        en: API key
+      description:
+        zh: 加密保存。留空时插件只返回普通刮削合并结果。
+        en: Stored encrypted. When empty, the plugin returns the normal merged scraper result.
+    model:
+      type: string
+      title:
+        zh: 模型
+        en: Model
+      default: gpt-4.1-mini
+    temperature:
+      type: number
+      title:
+        zh: 温度
+        en: Temperature
+      default: 0.1
+      minimum: 0
+      maximum: 1
+    max_candidates:
+      type: integer
+      title:
+        zh: 最大候选数
+        en: Max candidates
+      description:
+        zh: 送给 AI 的总候选结果上限。系统会先收集所有普通刮削插件返回的候选，按书名相关度排序，再取前 N 条。
+        en: Total candidate limit sent to AI. Ting Reader first collects candidates from all normal scraper plugins, sorts them by title relevance, then keeps the top N.
+      default: 8
+      minimum: 1
+      maximum: 20
+    chapter_title_cleanup:
+      type: string
+      title:
+        zh: 章节名清洗
+        en: Chapter title cleanup
+      description:
+        zh: 控制扫描生成章节标题前的清洗方式。AI 清洗会把章节候选名发送给模型并按文件顺序应用返回结果；保留原始章节名会跳过内置清洗。
+        en: Controls chapter title cleanup before scanned chapter titles are generated. AI cleanup sends chapter candidates to the model and applies returned titles in file order; preserving raw titles skips built-in cleanup.
+      default: clean
+      enum:
+      - clean
+      - ai
+      - preserve
+      enum_labels:
+        clean:
+          zh: 使用内置清洗
+          en: Use built-in cleanup
+        ai:
+          zh: 使用 AI 清洗
+          en: Use AI cleanup
+        preserve:
+          zh: 保留原始章节名
+          en: Preserve raw chapter titles
+    max_chapter_titles:
+      type: integer
+      title:
+        zh: AI 章节名每批数量
+        en: AI chapter title batch size
+      description:
+        zh: 使用 AI 清洗章节名时，每次请求最多发送给模型的章节候选数量；超过后会自动分批继续请求。
+        en: Maximum chapter candidates sent to the model per request when AI chapter cleanup is enabled; larger books are split into multiple requests automatically.
+      default: 200
+      minimum: 1
+      maximum: 1000
+    chapter_title_format:
+      type: string
+      title:
+        zh: 章节格式
+        en: Chapter format
+      description:
+        zh: 选择扫描生成章节标题时使用的模板。自定义模板中的 {chapter_number_padded} 表示 4 位补零章节号，例如 0001。
+        en: Select the template used for scanned chapter titles. In custom templates, {chapter_number_padded} is a 4-digit zero-padded chapter number, for example 0001.
+      default: chapter-title
+      enum:
+      - chapter-title
+      - book-chapter-title
+      - chapter-number-title
+      - custom
+      enum_labels:
+        chapter-title:
+          zh: 仅章节名
+          en: Chapter title only
+        book-chapter-title:
+          zh: 书名-章节号-章节名
+          en: Book title - chapter number - chapter title
+        chapter-number-title:
+          zh: 章节号-章节名
+          en: Chapter number - chapter title
+        custom:
+          zh: 自定义模板
+          en: Custom template
+    custom_chapter_title_template:
+      type: string
+      title:
+        zh: 自定义章节模板
+        en: Custom chapter template
+      description:
+        zh: 支持 {book_title} 书名、{chapter_number} 普通章节号、{chapter_number_padded} 4 位补零章节号（0001）、{chapter_title} 原章节名。
+        en: Supports {book_title} for book title, {chapter_number} for normal number, {chapter_number_padded} for 4-digit zero-padded number (0001), and {chapter_title} for original chapter title.
+      default: '{book_title}-{chapter_number}-{chapter_title}'
+    system_prompt:
+      type: string
+      title:
+        zh: 系统提示词
+        en: System prompt
+      description:
+        zh: 元数据选择提示词。留空使用内置提示词。请要求模型只返回 JSON。
+        en: Metadata selection prompt. Leave empty to use the built-in prompt. Ask the model to return JSON only.
+    title_cleanup_prompt:
+      type: string
+      title:
+        zh: 书名清洗提示词
+        en: Title cleanup prompt
+      description:
+        zh: 自动扫描时，普通刮削器搜索前用于清洗搜索书名的独立提示词。留空使用内置提示词。请要求模型只返回包含 title 的 JSON。
+        en: Independent prompt used to clean the search title before ordinary scraper searches during automatic scans. Leave empty to use the built-in prompt. Ask the model to return JSON containing only title.
+    chapter_title_cleanup_prompt:
+      type: string
+      title:
+        zh: 章节名清洗提示词
+        en: Chapter title cleanup prompt
+      description:
+        zh: 使用 AI 清洗章节名时的独立提示词。留空使用内置提示词。请要求模型只返回包含 chapter_titles 的 JSON。
+        en: Independent prompt used when AI chapter title cleanup is enabled. Leave empty to use the built-in prompt. Ask the model to return JSON containing only chapter_titles.
+permissions:
+- type: network_access
+  value: '*'
