@@ -213,3 +213,5 @@ config_schema:
 permissions:
 - type: network_access
   value: '*'
+
+# rebuild v1.0.0
