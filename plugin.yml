@@ -8,6 +8,7 @@ description:
   en: Aggregate configured automatic scraper results and use AI to choose audiobook metadata.
 runtime: javascript
 license: MIT
+repo: dqsq2e2/ai-scraper-js
 entry_point: plugin.js
 capabilities:
 - id: metadata.search
@@ -214,4 +215,3 @@ permissions:
 - type: network_access
   value: '*'
 
-# rebuild v1.0.0
