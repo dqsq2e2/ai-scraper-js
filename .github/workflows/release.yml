@@ -7,10 +7,17 @@ on:
     paths:
       - "plugin.yml"
       - "plugin.js"
+      - "sdk.mjs"
+      - "ui/**"
+      - "tests/**"
       - "README.md"
       - ".github/workflows/release.yml"
       - ".github/trpack/**"
   workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -36,7 +43,13 @@ jobs:
           match = re.search(r"^version:\s*([^\s#]+)", text, re.M)
           if not match:
               raise SystemExit("plugin.yml version not found")
-          print(match.group(1))
+          version = match.group(1).strip("\"'")
+          if Path("Cargo.toml").exists():
+              import tomllib
+              package_version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+              if package_version != version:
+                  raise SystemExit("Cargo.toml and plugin.yml versions differ")
+          print(version)
           PY
           )
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -52,28 +65,26 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-  tag:
+  build-and-release:
     needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - name: Create Tag
-        shell: bash
-        run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
-          git tag "v$VERSION" "$(git rev-parse HEAD)"
-          git push origin "refs/tags/v$VERSION"
-
-  build-and-release:
-    needs: [check-version, tag]
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
         with:
-          ref: v${{ needs.check-version.outputs.version }}
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Check JavaScript modules
+        run: |
+          node --check plugin.js
+          node --check sdk.mjs
+          if [[ -d ui ]]; then
+            find ui -name '*.js' -exec node --check {} \;
+          fi
 
       - name: Package .tr
         shell: bash
@@ -82,20 +93,28 @@ jobs:
         run: |
           TRPACK=".github/trpack/linux-x86_64/trpack"
           chmod +x "$TRPACK"
+          [[ "$("$TRPACK" --version)" == "trpack 2.0.1" ]]
           mkdir -p dist
           if [[ -z "${TRPACK_SIGNING_KEY:-}" ]]; then
             echo "::error::TRPACK_SIGNING_KEY secret is required for official plugin builds"
             exit 1
           fi
-          printf '%s' "$TRPACK_SIGNING_KEY" > .trpack-signing-key.json
+          KEY_FILE="$RUNNER_TEMP/trpack-signing-key.json"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          umask 077
+          printf '%s' "$TRPACK_SIGNING_KEY" > "$KEY_FILE"
 
           OUT="dist/ai-scraper-js-${{ needs.check-version.outputs.version }}.tr"
           "$TRPACK" validate .
-          "$TRPACK" build . --output "$OUT" --sign-key .trpack-signing-key.json
+          "$TRPACK" build . --output "$OUT" --sign-key "$KEY_FILE"
           "$TRPACK" verify "$OUT"
+          (cd dist && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
-          files: dist/*.tr
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/*.tr
+            dist/*.tr.sha256

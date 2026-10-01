@@ -1,4 +1,5 @@
 "use strict";
+import { success, publishSearch } from "./sdk.mjs";
 
 const DEFAULT_SYSTEM_PROMPT = [
   "你是 Ting Reader 的有声书元数据选择器。",
@@ -32,17 +33,17 @@ const DEFAULT_CHAPTER_TITLE_CLEANUP_PROMPT = [
   "清洗章节名时移除平台广告、文件后缀、重复书名、主播/版权噪声和多余符号，保留有意义的小标题；无法判断时返回去掉文件后缀后的原始 title。"
 ].join("\n");
 
-async function search(args) {
+async function searchImpl(args) {
   const config = readConfig();
   const fallback = buildFallbackItem(args, config);
 
-  if (args?.title_cleanup === true) {
+  if (args?.context?.mode === "title_cleanup") {
     return cleanSearchTitle(args, config, fallback);
   }
 
   const allChapterCandidates =
     config.chapterTitleCleanup === "ai"
-      ? normalizeChapterCandidates(args?.scanner_context?.chapters)
+      ? normalizeChapterCandidates(args?.chapter_candidates)
       : [];
 
   if (!config.apiKey) {
@@ -72,6 +73,10 @@ async function search(args) {
     Ting?.log?.warn?.(`AI metadata selection failed: ${error}`);
     return toSearchResult(fallback, args);
   }
+}
+
+export async function search(args) {
+  return success(publishSearch(await searchImpl(args), args));
 }
 
 async function cleanSearchTitle(args, config, fallback) {
@@ -140,14 +145,14 @@ function resolveChapterTemplate(config) {
 }
 
 function buildModelInput(args, config, fallback, chapterCandidates, totalChapterCandidates) {
-  const candidates = Array.isArray(args?.candidates) ? args.candidates : [];
-  const scannerContext = { ...(args?.scanner_context || {}) };
+  const candidates = Array.isArray(args?.context?.candidates) ? args.context.candidates : [];
+  const scannerContext = { ...(args?.context?.scanner_context || {}) };
   delete scannerContext.chapters;
 
   return {
     instruction: "Select the best audiobook metadata fields from candidates. Return JSON only.",
-    original_query: args?.query || args?.title || "",
-    scraper_query: args?.scraper_query || args?.search_query || args?.query || args?.title || "",
+    original_query: args?.title || "",
+    scraper_query: args?.context?.scraper_query || args?.title || "",
     scanner_context: scannerContext,
     chapter_candidates: chapterCandidates,
     chapter_batch: {
@@ -155,7 +160,7 @@ function buildModelInput(args, config, fallback, chapterCandidates, totalChapter
       count: chapterCandidates.length,
       total: totalChapterCandidates
     },
-    merged_metadata: args?.merged_metadata || fallback,
+    merged_metadata: args?.context?.merged_metadata || fallback,
     candidates: candidates.slice(0, config.maxCandidates),
     output_rules: {
       do_not_invent: true,
@@ -176,13 +181,13 @@ function buildModelInput(args, config, fallback, chapterCandidates, totalChapter
 }
 
 function buildTitleCleanupInput(args, fallback) {
-  const scannerContext = { ...(args?.scanner_context || {}) };
+  const scannerContext = { ...(args?.context?.scanner_context || {}) };
   delete scannerContext.chapters;
 
   return {
     instruction: "Clean this audiobook title before searching ordinary scraper plugins. Return JSON only.",
     title_cleanup: true,
-    original_query: args?.query || args?.title || fallback.title || "",
+    original_query: args?.title || fallback.title || "",
     scanner_context: scannerContext,
     current_metadata: scannerContext.current_metadata || {},
     output_rules: {
@@ -199,7 +204,7 @@ function buildTitleCleanupInput(args, fallback) {
 function buildChapterCleanupInput(args, config, fallback, selectedMetadata, chapterCandidates, offset, totalCount) {
   return {
     instruction: "Clean only these audiobook chapter titles. Return JSON only.",
-    original_query: args?.query || args?.title || "",
+    original_query: args?.title || "",
     selected_metadata: {
       title: firstText(selectedMetadata.title, fallback.title),
       author: firstText(selectedMetadata.author, fallback.author),
@@ -226,13 +231,13 @@ function buildChapterCleanupInput(args, config, fallback, selectedMetadata, chap
 }
 
 function buildFallbackItem(args, config) {
-  const merged = args?.merged_metadata || {};
-  const scanner = args?.scanner_context || {};
+  const merged = args?.context?.merged_metadata || {};
+  const scanner = args?.context?.scanner_context || {};
   const current = scanner?.current_metadata || {};
-  const query = args?.query || args?.title || current?.title || merged?.title || "Unknown Book";
+  const query = args?.title || current?.title || merged?.title || "Unknown Book";
 
   const item = {
-    id: `ai:${stableId(query)}`,
+    id: null,
     title: firstText(merged.title, current.title, query),
     author: firstText(merged.author, current.author, "Unknown"),
     narrator: firstOptionalText(merged.narrator, current.narrator),
@@ -300,7 +305,7 @@ async function callChatCompletion(input, config, systemPrompt) {
 }
 
 async function cleanChapterTitlesInBatches(args, config, fallback, selectedMetadata, allChapterCandidates, firstParsed) {
-  const titles = new Array(allChapterCandidates.length).fill("");
+  const titles = allChapterCandidates.map((candidate) => candidate.title);
   fillChapterTitleBatch(titles, 0, firstParsed?.chapter_titles, Math.min(config.maxChapterTitles, allChapterCandidates.length));
 
   if (allChapterCandidates.length <= config.maxChapterTitles) {
@@ -343,7 +348,7 @@ async function cleanChapterTitlesInBatches(args, config, fallback, selectedMetad
 function fillChapterTitleBatch(target, offset, rawTitles, batchSize) {
   const titles = normalizeChapterTitles(rawTitles, batchSize);
   for (let index = 0; index < batchSize; index += 1) {
-    target[offset + index] = titles[index] || "";
+    target[offset + index] = titles[index] || target[offset + index];
   }
 }
 
@@ -352,7 +357,8 @@ function toSearchResult(item, args) {
     items: [item],
     total: 1,
     page: Number(args?.page || 1),
-    page_size: Number(args?.page_size || 1)
+    page_size: Number(args?.page_size || 20),
+    has_more: false
   };
 }
 
@@ -415,16 +421,15 @@ function normalizeChapterCandidates(value) {
   return value
     .map((item, index) => {
       const source = item && typeof item === "object" ? item : {};
-      const filename = firstText(source.filename, source.name, source.path, "");
-      const title = firstText(source.title, source.stem, filename);
+      const title = firstText(source.title, "");
 
       return {
-        index: Number(source.index) || index + 1,
-        filename,
+        id: source.id,
+        index: index + 1,
         title
       };
     })
-    .filter((item) => item.title || item.filename);
+    .filter((item) => item.title);
 }
 
 function normalizeChapterTitles(value, maxCount) {
@@ -459,16 +464,6 @@ function pruneEmpty(item) {
   if (!Array.isArray(result.tags)) result.tags = [];
   if (!Array.isArray(result.chapter_titles)) result.chapter_titles = [];
   return result;
-}
-
-function stableId(value) {
-  let hash = 2166136261;
-  const text = String(value || "");
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
 }
 
 function stringValue(value, fallback) {
